@@ -1,0 +1,3 @@
+"""
+Mini RAG FastAPI service.
+"""

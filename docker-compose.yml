@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  rag:
+    build: .
+    container_name: mini-rag
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ALLOWED_ORIGINS=*
+    volumes:
+      - ./documents:/app/documents:ro
+    restart: unless-stopped
