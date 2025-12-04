@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     allowed_origins: str = "*"
 
     # Prompts per domain.
-    prompt: str = "Explica las funciones del parlamento."
+    prompt: str = "" # Default por si es necesario, hablamos ayer que por defecto podría ser bulletins, lo dejo vacío para determinar cual debe ser
     prompt_news: str = "Responde citando noticias del DOGV."
     prompt_bulletins: str = "Responde citando boletines del BOUA."
     prompt_parliament: str = "Explica las funciones del parlamento."
