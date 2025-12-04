@@ -26,6 +26,6 @@ docker compose up --build
 - `prompt_*`: prompt base por dominio.
 - `chunk_size` / `chunk_overlap`: control de troceo de textos.
 - `top_k`: número de fragmentos devueltos en el contexto.
-- `llm_server` / `llm_api_key`: URL y API key si se quiere llamar a un servidor LLM tipo OpenAI compatible.
+- `llm_server` / `llm_api_key`: URL y API key, por si acaso se quiere llamar a un servidor LLM compatible con OpenAI.
 
 Los ficheros `.jsonl` deben tener al menos `text` y `language`. El dominio se infiere del nombre del archivo.
