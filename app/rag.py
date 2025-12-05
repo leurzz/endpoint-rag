@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import List, Tuple
 
@@ -41,10 +42,11 @@ class Generator:
 
     async def start(self) -> None:
         if self.settings.llm_server:
+            base_url = str(self.settings.llm_server).rstrip("/")
             self.client = httpx.AsyncClient(
-                base_url=str(self.settings.llm_server),
+                base_url=base_url,
                 headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
-                timeout=30.0,
+                timeout=self.settings.llm_request_timeout,
             )
 
     async def shutdown(self) -> None:
@@ -91,13 +93,68 @@ class Generator:
             "temperature": self.settings.temperature,
             "stream": False,
         }
-        response = await self.client.post("/v1/chat/completions", json=payload)
-        response.raise_for_status()
+        path = self._resolve_chat_path()
+        response = await self._post_with_retry(path, payload)
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
             return self._generate_locally(prompt, domain, contexts)
         return choices[0]["message"]["content"]
+
+    def _resolve_chat_path(self) -> str:
+        """
+        Build the chat completions path, avoiding double /v1 and supporting Azure-style paths.
+        """
+        base = str(self.settings.llm_server).rstrip("/")
+        path = self.settings.llm_chat_path
+
+        # Azure OpenAI path if deployment/version provided.
+        if self.settings.llm_deployment and self.settings.llm_api_version:
+            path = (
+                f"/openai/deployments/{self.settings.llm_deployment}/chat/completions"
+                f"?api-version={self.settings.llm_api_version}"
+            )
+
+        # Prevent double /v1 if base already ends with /v1.
+        if base.endswith("/v1") and path.startswith("/v1"):
+            path = path[len("/v1") :] or "/chat/completions"
+
+        if not path.startswith("/"):
+            path = "/" + path
+        return path
+
+    async def _post_with_retry(self, path: str, payload: dict) -> httpx.Response:
+        assert self.client is not None
+        retries = max(self.settings.llm_max_retries, 1)
+        backoff = max(self.settings.llm_retry_backoff, 0.5)
+        for attempt in range(retries):
+            try:
+                response = await self.client.post(path, json=payload)
+                if response.status_code == 429 and attempt < retries - 1:
+                    delay = self._retry_delay(response, backoff, attempt)
+                    logger.warning("LLM 429 Too Many Requests, retrying in %.2fs", delay)
+                    await asyncio.sleep(delay)
+                    continue
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response else None
+                if status in {500, 502, 503, 504} and attempt < retries - 1:
+                    delay = self._retry_delay(exc.response, backoff, attempt)
+                    logger.warning("LLM %s error, retrying in %.2fs", status, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+        raise RuntimeError("Exhausted retries calling LLM.")
+
+    def _retry_delay(self, response: httpx.Response, backoff: float, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return backoff * (2**attempt)
 
     def _generate_locally(self, prompt: str, domain: str, contexts: List[ContextItem]) -> str:
         system_prompt = self.settings.prompt_for_domain(domain)

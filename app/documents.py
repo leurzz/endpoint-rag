@@ -1,8 +1,10 @@
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+import os
 
 import numpy as np
 
@@ -29,6 +31,18 @@ class DocumentStore:
         self.settings = settings
         self.embedding_service = embedding_service
         self.chunks: List[DocumentChunk] = []
+        self.use_chroma = settings.use_chroma
+        self.chroma_client = None
+        self.collections: Dict[str, object] = {}
+
+        if self.use_chroma:
+            try:
+                import chromadb
+
+                self.chroma_client = chromadb.PersistentClient(path=self.settings.index_directory)
+            except Exception as exc:
+                logger.error("Failed to initialize Chroma, falling back to in-memory store: %s", exc)
+                self.use_chroma = False
 
     def build(self) -> None:
         documents_path = Path(self.settings.documents_path)
@@ -37,11 +51,15 @@ class DocumentStore:
             return
 
         logger.info("Building index from %s", documents_path)
+        count = 0
         for jsonl_file in documents_path.glob("*.jsonl"):
             domain = self._infer_domain(jsonl_file)
-            self._process_file(jsonl_file, domain)
+            count += self._process_file(jsonl_file, domain)
 
-        logger.info("Indexed %s chunks", len(self.chunks))
+        if self.use_chroma:
+            logger.info("Indexed %s chunks into Chroma (persistent).", count)
+        else:
+            logger.info("Indexed %s chunks in memory.", len(self.chunks))
 
     def _infer_domain(self, path: Path) -> str:
         stem = path.stem.lower()
@@ -50,8 +68,9 @@ class DocumentStore:
                 return domain
         return "parliament"
 
-    def _process_file(self, path: Path, domain: str) -> None:
+    def _process_file(self, path: Path, domain: str) -> int:
         logger.info("Processing %s for domain=%s", path.name, domain)
+        added = 0
         with path.open("r", encoding="utf-8") as fh:
             for idx, line in enumerate(fh):
                 line = line.strip()
@@ -63,26 +82,59 @@ class DocumentStore:
                     logger.warning("Skipping invalid JSON at %s:%s", path, idx + 1)
                     continue
                 text = payload.get("text")
-                language = payload.get("language")
+                raw_language = payload.get("language")
                 title = payload.get("title") or path.stem
-                if not text or not language:
+                if not text or not raw_language:
                     logger.debug("Skipping entry missing text or language at %s:%s", path, idx + 1)
                     continue
-                if language not in self.settings.languages:
+                language = self.match_language(str(raw_language))
+                if not language:
                     continue
                 for chunk_index, chunk_text in enumerate(self._chunk_text(text)):
                     embedding = self.embedding_service.embed(chunk_text)
-                    chunk = DocumentChunk(
-                        id=f"{path.stem}-{idx}-{chunk_index}",
-                        text=chunk_text,
-                        language=language,
-                        domain=domain,
-                        source_path=str(path),
-                        chunk_index=chunk_index,
-                        embedding=embedding,
-                        metadata={"title": title},
-                    )
-                    self.chunks.append(chunk)
+                    metadata = {
+                        "title": title,
+                        "source_path": str(path),
+                        "chunk_index": chunk_index,
+                        "language": language,
+                        "domain": domain,
+                    }
+                    chunk_id = f"{path.stem}-{idx}-{chunk_index}"
+                    if self.use_chroma and self.chroma_client:
+                        collection = self._get_collection(domain, language)
+                        collection.upsert(
+                            ids=[chunk_id],
+                            documents=[chunk_text],
+                            metadatas=[metadata],
+                            embeddings=[embedding.tolist()],
+                        )
+                    else:
+                        chunk = DocumentChunk(
+                            id=chunk_id,
+                            text=chunk_text,
+                            language=language,
+                            domain=domain,
+                            source_path=str(path),
+                            chunk_index=chunk_index,
+                            embedding=embedding,
+                            metadata={"title": title},
+                        )
+                        self.chunks.append(chunk)
+                    added += 1
+        return added
+
+    def match_language(self, raw_language: str) -> Optional[str]:
+        """
+        Return a normalized language code if any allowed language appears in the raw string.
+        Accepts patterns like "va|es" or "va,es" or "va es".
+        """
+        tokens = re.split(r"[\\|,\\s]+", raw_language.lower())
+        for token in tokens:
+            if token in self.settings.languages:
+                return token
+        if raw_language.lower() in self.settings.languages:
+            return raw_language.lower()
+        return None
 
     def _chunk_text(self, text: str) -> Iterable[str]:
         size = max(self.settings.chunk_size, 1)
@@ -100,11 +152,44 @@ class DocumentStore:
         domain: str,
         top_k: Optional[int] = None,
     ) -> List[Tuple[DocumentChunk, float]]:
-        if not self.chunks:
+        if not self.use_chroma and not self.chunks:
             logger.warning("No indexed chunks available.")
             return []
 
+        limit = top_k or self.settings.top_k
         query_embedding = self.embedding_service.embed(query)
+
+        if self.use_chroma and self.chroma_client:
+            collection = self._get_collection(domain, language)
+            results = collection.query(
+                query_embeddings=[query_embedding.tolist()],
+                n_results=limit,
+                include=["documents", "metadatas", "distances", "embeddings"],
+            )
+            docs = results.get("documents", [[]])[0]
+            metas = results.get("metadatas", [[]])[0]
+            ids = results.get("ids", [[]])[0]
+            dists = results.get("distances", [[]])[0] if results.get("distances") else []
+            chunks: List[Tuple[DocumentChunk, float]] = []
+            for idx, doc in enumerate(docs):
+                meta = metas[idx] if idx < len(metas) else {}
+                chunk_id = ids[idx] if idx < len(ids) else f"{domain}-{language}-{idx}"
+                distance = dists[idx] if idx < len(dists) else 0.0
+                score = 1.0 - float(distance)  # cosine distance -> similarity
+                chunk = DocumentChunk(
+                    id=chunk_id,
+                    text=doc,
+                    language=meta.get("language", language),
+                    domain=meta.get("domain", domain),
+                    source_path=meta.get("source_path", ""),
+                    chunk_index=int(meta.get("chunk_index", idx)),
+                    embedding=np.array([], dtype=np.float32),
+                    metadata={"title": meta.get("title", "")},
+                )
+                chunks.append((chunk, score))
+            return chunks
+
+        # In-memory fallback.
         filtered = [
             chunk for chunk in self.chunks if chunk.language == language and chunk.domain == domain
         ]
@@ -114,5 +199,14 @@ class DocumentStore:
             scored.append((chunk, score))
 
         scored.sort(key=lambda item: item[1], reverse=True)
-        limit = top_k or self.settings.top_k
         return scored[:limit]
+
+    def _get_collection(self, domain: str, language: str):
+        if not self.chroma_client:
+            raise RuntimeError("Chroma client not initialized")
+        name = f"{domain}_{language}"
+        if name not in self.collections:
+            self.collections[name] = self.chroma_client.get_or_create_collection(
+                name=name, metadata={"hnsw:space": "cosine"}
+            )
+        return self.collections[name]

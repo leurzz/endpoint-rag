@@ -27,5 +27,8 @@ docker compose up --build
 - `chunk_size` / `chunk_overlap`: control de troceo de textos.
 - `top_k`: número de fragmentos devueltos en el contexto.
 - `llm_server` / `llm_api_key`: URL y API key, por si acaso se quiere llamar a un servidor LLM compatible con OpenAI.
+- `use_chroma`: `True` por defecto para persistir embeddings en Chroma (usa `index_directory`, montado en `./index` en docker-compose) y evitar reindexar al reiniciar.
 
 Los ficheros `.jsonl` deben tener al menos `text` y `language`. El dominio se infiere del nombre del archivo.
+
+
