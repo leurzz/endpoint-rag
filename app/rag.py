@@ -43,9 +43,12 @@ class Generator:
     async def start(self) -> None:
         if self.settings.llm_server:
             base_url = str(self.settings.llm_server).rstrip("/")
+            headers = {}
+            if self.settings.llm_api_key:
+                headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
             self.client = httpx.AsyncClient(
                 base_url=base_url,
-                headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                headers=headers,
                 timeout=self.settings.llm_request_timeout,
             )
 
