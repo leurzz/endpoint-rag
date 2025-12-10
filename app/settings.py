@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 100
     top_k: int = 4
     temperature: float = 0.5
+    skip_rebuild: bool = False  # If true, do not rebuild index on startup (assumes persisted Chroma)
 
     languages: List[str] = Field(default_factory=lambda: ["va"])
     domains: List[str] = Field(default_factory=lambda: ["parliament", "news", "bulletins"])

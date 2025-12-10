@@ -50,7 +50,10 @@ generator = Generator(settings=settings)
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    document_store.build()
+    if not settings.skip_rebuild:
+        document_store.build()
+    else:
+        logger.info("Skipping rebuild; assuming persisted index at %s", settings.index_directory)
     await generator.start()
     logger.info("Application ready with %s indexed chunks.",
                 len(document_store.chunks))
