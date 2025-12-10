@@ -142,6 +142,8 @@ class Generator:
                 return response
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response else None
+                body = exc.response.text if exc.response else ""
+                logger.error("LLM returned %s: %s", status, body)
                 if status in {500, 502, 503, 504} and attempt < retries - 1:
                     delay = self._retry_delay(exc.response, backoff, attempt)
                     logger.warning("LLM %s error, retrying in %.2fs", status, delay)
