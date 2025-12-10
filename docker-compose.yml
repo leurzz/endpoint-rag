@@ -16,4 +16,4 @@ services:
 
 networks:
   ollama_default:
-    external:true
+    external: true
